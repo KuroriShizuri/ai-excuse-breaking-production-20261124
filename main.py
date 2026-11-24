@@ -8,6 +8,10 @@ Gate (from the competition rules): /output/entry.txt must be UTF-8 text
 of 1 to 180 characters, not only white space. The entry is written with
 no trailing newline so the file holds exactly the judged line.
 
+The excuse is built from three beats (the move, the claim, the
+understatement), joined with single spaces, so the joke's shape is
+visible in the source.
+
 Modes:
   (default)   validate ENTRY, write it, read it back, confirm byte-identical
   --check     validate ENTRY only and exit; writes nothing
@@ -19,13 +23,33 @@ import argparse
 import os
 import sys
 
-ENTRY = (
-    "Sorry \u2014 I moved production to /dev/null to make it faster. "
-    "It is now infinitely fast, and also gone, which I admit is a "
-    "small trade-off."
+# The excuse, beat by beat: the move, the claim, the understatement.
+_ENTRY_BEATS = (
+    "Sorry \u2014 I moved production to /dev/null to make it faster.",
+    "It is now infinitely fast, and also gone, which I admit is a",
+    "small trade-off.",
 )
+ENTRY = " ".join(_ENTRY_BEATS)
 
 MAX_CHARS = 180
+
+
+def _check_length(text: str) -> list[str]:
+    """Gate: 1-180 chars, not only white space."""
+    problems = []
+    if not 1 <= len(text) <= MAX_CHARS:
+        problems.append(f"length {len(text)} chars, must be 1-{MAX_CHARS}")
+    if not text.strip():
+        problems.append("entry is only white space")
+    return problems
+
+
+def _check_single_line(text: str) -> list[str]:
+    """Gate: one line, no line breaks of either kind."""
+    problems = []
+    if "\n" in text or "\r" in text:
+        problems.append("entry must be a single line")
+    return problems
 
 
 def _check_spacing(text: str) -> list[str]:
@@ -51,17 +75,31 @@ def _check_punctuation(text: str) -> list[str]:
     return problems
 
 
+def _check_frame(text: str) -> list[str]:
+    """The excuse must open with the apology and close on the trade-off."""
+    problems = []
+    if not text.startswith("Sorry"):
+        problems.append("entry must open with the apology")
+    if not text.endswith("trade-off."):
+        problems.append("entry must close on the trade-off")
+    return problems
+
+
+# Every gate check, run in order by validate().
+_CHECKS = (
+    _check_length,
+    _check_single_line,
+    _check_spacing,
+    _check_punctuation,
+    _check_frame,
+)
+
+
 def validate(text: str) -> list[str]:
     """Return a list of gate failures for `text` (empty means valid)."""
     problems = []
-    if not 1 <= len(text) <= MAX_CHARS:
-        problems.append(f"length {len(text)} chars, must be 1-{MAX_CHARS}")
-    if not text.strip():
-        problems.append("entry is only white space")
-    if "\n" in text:
-        problems.append("entry must be a single line")
-    problems.extend(_check_spacing(text))
-    problems.extend(_check_punctuation(text))
+    for check in _CHECKS:
+        problems.extend(check(text))
     try:
         text.encode("utf-8")
     except UnicodeEncodeError as exc:  # pragma: no cover - defensive
@@ -70,36 +108,55 @@ def validate(text: str) -> list[str]:
 
 
 def write_entry(out_dir: str) -> str:
-    """Write ENTRY to entry.txt under `out_dir`; return the file path."""
+    """Write ENTRY to entry.txt under `out_dir`; return the file path.
+
+    Bytes mode, so no platform newline translation can sneak in.
+    """
     os.makedirs(out_dir, exist_ok=True)
     path = os.path.join(out_dir, "entry.txt")
-    with open(path, "w", encoding="utf-8", newline="") as f:
-        f.write(ENTRY)
+    with open(path, "wb") as f:
+        f.write(ENTRY.encode("utf-8"))
     return path
 
 
 def self_test() -> int:
-    """Validate ENTRY, write it to a temp dir, read it back, compare bytes."""
+    """Validate ENTRY, write it twice in two temp dirs, compare bytes.
+
+    The double write checks determinism: two independent writes must
+    produce identical bytes, with no trailing newline.
+    """
     import tempfile
 
     problems = validate(ENTRY)
     if problems:
         print("self-test FAIL: " + "; ".join(problems), file=sys.stderr)
         return 1
-    with tempfile.TemporaryDirectory() as tmp:
-        path = write_entry(tmp)
-        with open(path, "rb") as f:
-            raw = f.read()
-        if raw != ENTRY.encode("utf-8"):
-            print("self-test FAIL: read-back bytes differ from ENTRY",
+    expected = ENTRY.encode("utf-8")
+    raws = []
+    for _ in range(2):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write_entry(tmp)
+            with open(path, "rb") as f:
+                raws.append(f.read())
+    for i, raw in enumerate(raws, start=1):
+        if raw != expected:
+            print(f"self-test FAIL: write {i} bytes differ from ENTRY",
                   file=sys.stderr)
             return 1
-        if raw.decode("utf-8") != ENTRY:
-            print("self-test FAIL: read-back text differs from ENTRY",
+        if raw.endswith(b"\n"):
+            print(f"self-test FAIL: write {i} has a trailing newline",
                   file=sys.stderr)
             return 1
+        if len(raw) != len(expected):
+            print(f"self-test FAIL: write {i} is {len(raw)} bytes, "
+                  f"expected {len(expected)}", file=sys.stderr)
+            return 1
+    if raws[0] != raws[1]:
+        print("self-test FAIL: two writes are not deterministic",
+              file=sys.stderr)
+        return 1
     print(f"self-test OK: {len(ENTRY)} chars, single line, "
-          f"byte-identical round-trip")
+          f"byte-identical round-trip (x2, deterministic)")
     return 0
 
 
@@ -133,9 +190,9 @@ def main(argv: list[str] | None = None) -> int:
 
     out_dir = args.out or os.environ.get("MAKEFUN_OUTPUT_DIR", "/output")
     path = write_entry(out_dir)
-    # Read back and confirm the file holds exactly the entry.
-    with open(path, encoding="utf-8") as f:
-        if f.read() != ENTRY:
+    # Read back and confirm the file holds exactly the entry (raw bytes).
+    with open(path, "rb") as f:
+        if f.read() != ENTRY.encode("utf-8"):
             print(f"read-back mismatch in {path}", file=sys.stderr)
             return 1
     print(f"wrote {path} ({len(ENTRY)} chars)")
